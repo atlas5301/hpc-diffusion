@@ -10,7 +10,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from skimage.metrics import structural_similarity as ssim
 
-model_path="stable-diffusion-v1-4"
+model_path="../models/stable-diffusion-v1-4"
 
 INT8_NOISE_FACTOR = 1/256
 
@@ -82,8 +82,8 @@ def gen(my_unet, latents, t, prompt_embeds, cross_attention_kwargs, guidance_sca
 if __name__ == '__main__':
     torch.manual_seed(12345)
 
-    model_path="stable-diffusion-v1-4"
-    prompt = "an astronaut riding a horse on Mars"
+    model_path="../models/stable-diffusion-v1-4"
+    prompt = "A fairytale-inspired castle on a hill, surrounded by lush gardens and a moat with a drawbridge."
     guidance_scale = 8.0
     t=981
     num_inference_steps=30
@@ -132,7 +132,7 @@ if __name__ == '__main__':
     # cross_attention_kwargs = None
     extra_step_kwargs = pipeline.prepare_extra_step_kwargs(generator, 0.0)
   
-    for j in range(100):
+    for j in range(10):
         latents = pipeline.prepare_latents(1,num_channels_latents,512,512,prompt_embeds.dtype, torch.device('cuda'), generator)
         num_warmup_steps = len(timesteps) - num_inference_steps * scheduler.order
         
@@ -160,7 +160,7 @@ if __name__ == '__main__':
             out1=numpy_to_pil(decode_latents(output1))
             out2=numpy_to_pil(decode_latents(output2))
             
-            get_concat_h(out1[0], out2[0]).save("./tmp/"+"test"+str(j)+".png")
+            get_concat_h(out1[0], out2[0]).save("../tmp/"+"test"+str(j)+".png")
 
             
             
