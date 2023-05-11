@@ -1,4 +1,5 @@
 import torch
+import diffusers
 from diffusers import DiffusionPipeline
 from diffusers import DPMSolverSinglestepScheduler
 from diffusers.models.cross_attention import AttnProcessor2_0
@@ -34,7 +35,16 @@ prompts = [
 ]
 
 
-def find_median(numbers):
+def find_median(numbers:list):
+    '''
+        give the median of the list 'numbers'
+
+        Args:
+            numbers: a list of numbers
+
+        Returns:
+            the median of 'numbers'
+    '''
     sorted_numbers = sorted(numbers)
     n = len(numbers)
 
@@ -46,6 +56,17 @@ def find_median(numbers):
     return median
 
 def calculate_ssim(pil_img1, pil_img2, data_range=255):
+    '''
+    calculate the ssim of two pil images.
+
+    Args:
+        pil_img1: the first image
+        pil_img2: the second image
+
+    Returns:
+        Returns the ssim score, which ranges from -1 to 1. Higher scores indicate better similarity.
+    '''
+    
     # Ensure both images have the same size
     if pil_img1.size != pil_img2.size:
         raise ValueError("Images must have the same dimensions")
@@ -59,9 +80,9 @@ def calculate_ssim(pil_img1, pil_img2, data_range=255):
 
     return ssim_value
 
-def gen(my_unet, latents, t, prompt_embeds, cross_attention_kwargs, guidance_scale, do_classifier_free_guidance):
+def gen(my_unet, latents, t, prompt_embeds, cross_attention_kwargs, guidance_scale):
     with torch.no_grad():
-        latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+        latent_model_input = torch.cat([latents] * 2)
         noise_pred = my_unet(
                     latent_model_input,
                     t,
@@ -80,6 +101,7 @@ class AccBenchmark(object):
     scheduler = None
     prompt_embeddings:list = []
     init_latents:list = []
+    extra_step_kwargs:list = []
     guidance_scale:float = 8.0
     cross_attention_kwargs=None
     device = torch.device('cuda')
@@ -92,8 +114,8 @@ class AccBenchmark(object):
     do_classifier_free_guidance = True
 
     def __init__(self,
-                 _baseline_pipeline,
-                 _scheduler = DPMSolverSinglestepScheduler(beta_start=0.00085, beta_end=0.012),
+                 _baseline_pipeline:DiffusionPipeline,
+                 _scheduler: diffusers.schedulers.KarrasDiffusionSchedulers = DPMSolverSinglestepScheduler(beta_start=0.00085, beta_end=0.012),
                  _benchmark_sample_num = 20,
                  _guidance_scale = 8.0,
                  _device = torch.device('cuda'),
@@ -101,6 +123,23 @@ class AccBenchmark(object):
                  _resolution:int =512,
                  _batch_size: int = 1
                  ) -> None:
+        
+        '''
+        init the pipeline
+
+        Args:
+            _baseline_pipeline: The baseline pipeline. Only original diffusers.DiffusionPipeline supported.
+            _scheduler: the scheduler of the pipeline(for both baseline and custom pipelines).
+            _benchmark_sample_num: sample nums of the benchmark. No more than 20.
+            _guidance_scale: The guidance_scale of the baseline pipeline.
+            _device: the device you want the pipeline to run on.
+            _num_inference_steps: the inference_steps of the baseline pipeline.
+            _resolution: resolution of image output.
+            _batch_size: images per sample.
+            
+        Returns:
+            None
+        '''
         self.baseline_pipeline = _baseline_pipeline
         self.scheduler=_scheduler
         self.benchmark_sample_num=_benchmark_sample_num
@@ -112,6 +151,7 @@ class AccBenchmark(object):
         self.benchmark_samples = []
         self.prompt_embeddings = []
         self.init_latents = []
+        self.extra_step_kwargs = []
         self.baseline_pipeline.to(self.device)
         self.prepare_extra_step_kwargs = self.baseline_pipeline.prepare_extra_step_kwargs
         
@@ -126,8 +166,10 @@ class AccBenchmark(object):
             negative_prompt=None
             self.decode_latents=self.baseline_pipeline.decode_latents
             self.numpy_to_pil=self.baseline_pipeline.numpy_to_pil
-
+            
+            #generate PIL used for benchmark
             for i in range(self.benchmark_sample_num):
+                #first, generate prompt embeddings and save them
                 prompt = prompts[i]
                 prompt_embeds = _encode_prompt(
                     prompt,
@@ -140,25 +182,42 @@ class AccBenchmark(object):
                 )
                 self.prompt_embeddings.append(prompt_embeds)
             
+                #set scheduler
                 tmpscheduler = copy.deepcopy(self.scheduler)
                 tmpscheduler.set_timesteps(self.num_inference_steps, device=self.device)
                 timesteps = tmpscheduler.timesteps
+                #set unet
                 num_channels_latents = baseline_unet.config.in_channels  
                 generator = None 
                 extra_step_kwargs = self.baseline_pipeline.prepare_extra_step_kwargs(generator, 0.0)   
+                self.extra_step_kwargs.append(extra_step_kwargs)
                 latents = self.baseline_pipeline.prepare_latents(self.batch_size,num_channels_latents,self.resolution,self.resolution,prompt_embeds.dtype, self.device, generator) 
                 self.init_latents.append(latents)   
-                # num_warmup_steps = len(timesteps) - self.num_inference_steps * self.scheduler.order
                 output1 = copy.deepcopy(latents)
+                
+                #denoising
                 for j, t in enumerate(timesteps):
-                    tmp1 = gen(baseline_unet, output1, t, prompt_embeds,self.cross_attention_kwargs, self.guidance_scale,self.do_classifier_free_guidance)
+                    tmp1 = gen(baseline_unet, output1, t, prompt_embeds,self.cross_attention_kwargs, self.guidance_scale)
                     output1 = tmpscheduler.step(tmp1, t, output1, **extra_step_kwargs).prev_sample
+                    
+                #store the samples
                 out1=self.numpy_to_pil(self.decode_latents(output1))
                 self.benchmark_samples.append(out1)
-        self.baseline_pipeline = None
+        #remove the baseline_pipeline from the CUDA device to conserve DRAM.
+        self.baseline_pipeline = None  
 
 
-    def acc_benchmark(self, my_unet):
+    def acc_benchmark_single(self, my_unet):
+        '''
+        This benchmark exclusively evaluates a single U-Net by replacing the original U-Net in the pipeline.
+
+        Args:
+            my_unet: The U-Net to be assessed.
+
+        Returns:
+            Returns the accuracy score, which ranges from -1 to 1. Higher scores indicate better performance.
+        '''
+        
         my_unet.to(self.device)
         outs = []
         for i in range(self.benchmark_sample_num):
@@ -171,13 +230,37 @@ class AccBenchmark(object):
                 tmpscheduler.set_timesteps(self.num_inference_steps, device=self.device)
                 timesteps = tmpscheduler.timesteps
                 for j, t in enumerate(timesteps):
-                    tmp1 = gen(my_unet, output, t, prompt_embeds,self.cross_attention_kwargs, self.guidance_scale, self.do_classifier_free_guidance)
+                    tmp1 = gen(my_unet, output, t, prompt_embeds,self.cross_attention_kwargs, self.guidance_scale)
                     output = tmpscheduler.step(tmp1, t, output, **extra_step_kwargs).prev_sample 
                 out = self.numpy_to_pil(self.decode_latents(output))
                 for j in range(self.batch_size):
                     outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
         return find_median(outs)
         
+    def acc_benchmark_pipeline(self, pipeline):
+        '''
+        This benchmark exclusively evaluates a pipeline. .
+
+        Args:
+            pipeline: The pipeline to be assessed. get the given prompt_embeds and initial latent, and output the generated latent.
+
+        Returns:
+            Returns the accuracy score, which ranges from -1 to 1. Higher scores indicate better performance.
+        '''        
+        outs = []
+        for i in range(self.benchmark_sample_num):
+            latent = copy.deepcopy(self.init_latents[i])
+            prompt_embeds = self.prompt_embeddings[i]
+            extra_step_kwargs = self.extra_step_kwargs[i]
+            with torch.no_grad():
+                output = pipeline(prompt_embeds, latent, extra_step_kwargs) 
+                out = self.numpy_to_pil(self.decode_latents(output))               
+                for j in range(self.batch_size):
+                    outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
+        return find_median(outs)
+        
+
+
 
 # here is an example
 # if __name__ == "__main__":
