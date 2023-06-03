@@ -6,13 +6,21 @@ from typing import Any, Callable, Set, Dict
 import copy
 import random
 import numpy as np
+import io
 
 # from .gen_pipeline import PipelineGenerator
 # from .acc_bench import AccBenchmark
 from . import acc_bench
 from . import gen_pipeline
 from . import cuda_scheduler
+def serialize(object):
+    buffer = io.BytesIO()
+    torch.save(object, buffer)
+    return buffer.getvalue()
 
+def deserialize(object):
+    buffer = io.BytesIO(object)
+    return torch.load(buffer)
 
 def random_vector(max_n, max_value=50, num_values=6, similarity_factor=0.5):
     # Generate a list of all possible unique values
@@ -38,13 +46,20 @@ def random_vector(max_n, max_value=50, num_values=6, similarity_factor=0.5):
     return vector
 
 def task(pipeline_info, device, shared_object):
-    generator:gen_pipeline.PipelineGenerator = shared_object['generator']
-    benchmark:acc_bench.AccBenchmark = shared_object['benchmark']
-    keys = list(generator.models.keys()).sort()
-    pipeline_info = [keys[i] for i in pipeline_info]
-    pipeline = generator.generate(pipeline_info)
-    pipeline.move_to_device(device)
-    return benchmark.acc_benchmark_pipeline(pipeline)
+    with torch.no_grad():
+        # try:
+            generator:gen_pipeline.PipelineGenerator = shared_object['generator']
+            benchmark:acc_bench.MinAccbench = shared_object['benchmark'][device]
+            keys = sorted(generator.models.keys())
+            pipeline_info = [keys[i] for i in pipeline_info]
+            pipeline = generator.generate(pipeline_info)
+            pipeline.move_to_device(device)
+            result = benchmark.acc_benchmark_pipeline(pipeline, device)
+            pipeline.move_to_device('cpu')
+        # except Exception as e:
+        #     with open('debug3.txt', "w") as f:
+        #         f.write(str(e)) 
+    return serialize(result)
 
 class PipelineDescription(object):
     pipeline_info: list
@@ -77,38 +92,49 @@ class PipelineSearcher(object):
                 _num_inference_steps:int = 50,
                 _resolution:int =512,
                 _batch_size: int = 1,
+                _injected_models = {}
                 ) -> None:
         
         self.generator = gen_pipeline.PipelineGenerator(
-            _scheduler = _scheduler,
-            _guidance_scale = _guidance_scale,
-            _device_memory = _device_memory
+            _scheduler= _scheduler,
+            _guidance_scale= _guidance_scale,
+            _device_memory= _device_memory,
+            _injected_models= _injected_models
         )
+        self.generator.models.update(_injected_models)
         
         self.benchmark = acc_bench.AccBenchmark(
-            _baseline_pipeline = _baseline_pipeline,
-            _scheduler = _scheduler,
-            _benchmark_sample_num = _benchmark_sample_num,
-            _guidance_scale = _guidance_scale,
-            _device = _device,
-            _num_inference_steps = _num_inference_steps,
-            _resolution = _resolution,
-            _batch_size = _batch_size
+            _baseline_pipeline= _baseline_pipeline,
+            _scheduler= _scheduler,
+            _benchmark_sample_num= _benchmark_sample_num,
+            _guidance_scale= _guidance_scale,
+            _device= _device,
+            _num_inference_steps= _num_inference_steps,
+            _resolution= _resolution,
+            _batch_size= _batch_size
         )
         
+        
+    def scheduler_init(self):
         self.pipelines = []
         
-        self.taskscheduler = cuda_scheduler.TaskScheduler(task, {'benchmark':self.benchmark, 'generator':self.generator})
+        tmpdevices = ['cuda:{}'.format(i) for i in range(torch.cuda.device_count())]
+        tmpdict = {}
+        for device in tmpdevices:
+            tmpdict[device] = self.benchmark.gen_MinAccbench()
+        
+        self.taskscheduler = cuda_scheduler.TaskScheduler(task, {'benchmark':tmpdict, 'generator':self.generator})
         
     def generate_random_pipeline_info(self, M=6, K=30, temperature=0.4):
         N = len(self.generator.models)
+        M = min(N, M)
         # Determine the actual number of unique values and the actual length of the list
         # Use squaring to give higher weight to larger numbers
         actual_M = int(M * (random.random() ** 0.5)) + 1
         actual_K = int(K * (random.random() ** 0.5)) + 1
 
         # Generate actual_M unique values between 1 and N, and a list of size actual_K from these values
-        unique_values = random.sample(range(1, N+1), actual_M)
+        unique_values = random.sample(range(0, N), actual_M)
         random_list = [random.choice(unique_values) for _ in range(actual_K)]
         
         # Sort the list
@@ -138,14 +164,18 @@ class PipelineSearcher(object):
             unique_vals = list(set(lst))
             num_to_replace = min(len(unique_vals), max(1, int(np.random.exponential(1 / lambda_parameter))))
             old_vals = random.sample(unique_vals, num_to_replace)
-            new_vals = random.choices(range(1, len(self.generator.models)+1), k=num_to_replace)
+            new_vals = random.choices(range(0, len(self.generator.models)), k=num_to_replace)
             replace_dict = dict(zip(old_vals, new_vals))
             lst = [replace_dict.get(x, x) for x in lst]
         return lst
 
 
     def validate_pipeline_info(self, pipeline_info, time_limit) -> bool:
-        keys = list(self.generator.models.keys()).sort()
+        if (pipeline_info == None):
+            return False
+        if (not pipeline_info):
+            return False
+        keys = sorted(self.generator.models.keys())
         new_pipeline_info = [keys[i] for i in pipeline_info]
         device_model = set()
         current_memory = 0
@@ -167,7 +197,7 @@ class PipelineSearcher(object):
         return True
 
     def gen_pipeline_description(self, pipeline_info, accuracy) -> PipelineDescription:
-        keys = list(self.generator.models.keys()).sort()
+        keys = sorted(self.generator.models.keys())
         new_pipeline_info = [keys[i] for i in pipeline_info]
         device_model = set()
         current_memory = 0
@@ -182,7 +212,18 @@ class PipelineSearcher(object):
         
         return PipelineDescription(pipeline_info, accuracy, end2end_time, current_memory)      
         
-
+    def result_process(self, results):
+        tmplist = []
+        for output in results:
+            if (output!=None):
+                output = deserialize(output)
+                if ((output!=None) and output):
+                    tmplist.append(self.benchmark.acc_benchmark_outputs(output))
+                else:
+                    tmplist.append(None)
+            else:
+                tmplist.append(None)
+        return tmplist
 
     def searcher_run_once(
         self,
@@ -200,7 +241,8 @@ class PipelineSearcher(object):
         num_mutate = int(min(mutate_rate*num_candidates, len(self.pipelines)))
         current_time_limit = time_limit
         if (num_mutate == int(mutate_rate*num_candidates)):
-            current_time_limit = min(time_limit, self.pipelines[num_mutate-1].end2end_time)
+            if (num_mutate > 0):
+                current_time_limit = min(time_limit, self.pipelines[num_mutate-1].end2end_time)
             
         for i in range(num_mutate):
             new_pipelines.append(self.mutate(self.pipelines[i].pipeline_info, mutate_delete_weight, 1-mutate_delete_weight))
@@ -214,20 +256,35 @@ class PipelineSearcher(object):
                     new_pipelines.append(tmp)
                     break
         
+        
         results = self.taskscheduler.submit(new_pipelines)
+        with open('debug2.txt', "w") as f:
+            f.write(str(results))
+        results = self.result_process(results)
         len_results = len(results)
         for i in range(len_results):
+            if (results[i] == None):
+                continue
             if (results[i] > expected_accuracy):
                 self.pipelines.append(self.gen_pipeline_description(new_pipelines[i], results[i]))
                 
         self.pipelines = sorted(self.pipelines, key= lambda obj: obj.end2end_time)[:num_candidates]
         
+    # def result_process(self, results):
+    #     return [self.benchmark.acc_benchmark_outputs()]
+        
     def inject_pipelines(self, pipeline_info_list: list, expected_accuracy = 0.95, num_candidates = 120):
         results = self.taskscheduler.submit(pipeline_info_list)
         len_results = len(results)
+        with open('debug.txt', "w") as f:
+            f.write(str(results))
+            
+        results = self.result_process(results)
+            
         for i in range(len_results):
-            if (results[i] > expected_accuracy):
-                self.pipelines.append(self.gen_pipeline_description(pipeline_info_list[i], results[i]))
+            if (results[i] != None):
+                if (results[i] > expected_accuracy):
+                    self.pipelines.append(self.gen_pipeline_description(pipeline_info_list[i], results[i]))
                 
         self.pipelines = sorted(self.pipelines, key= lambda obj: obj.end2end_time)[:num_candidates]        
     

@@ -16,5 +16,6 @@ if __name__ == '__main__':
                                              torch_dtype=torch.float16,).to('cuda')
     tmpsearcher = PipelineSearcher(_baseline_pipeline= pipeline,)
     tmpsearcher.load(model_config_path, model_path)
+    tmpsearcher.scheduler_init()
     tmpsearcher.inject_pipelines([[j for i in range(50)] for j in range(len(tmpsearcher.generator.models))])
     print(tmpsearcher.search())

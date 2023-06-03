@@ -10,6 +10,8 @@ from PIL import Image
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from skimage.metrics import structural_similarity as ssim
+import pickle
+import io
 
 prompts = [
     "A serene lakeside scene with a family of swans gliding across the water, surrounded by weeping willows and a quaint wooden gazebo.",
@@ -93,6 +95,64 @@ def gen(my_unet, latents, t, prompt_embeds, cross_attention_kwargs, guidance_sca
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
     return noise_pred
+
+def serialize(object):
+    buffer = io.BytesIO()
+    torch.save(object, buffer)
+    return buffer.getvalue()
+
+def deserialize(object):
+    buffer = io.BytesIO(object)
+    return torch.load(buffer)
+
+class MinAccbench(object):
+    benchmark_sample_num = None,
+    init_latents = None
+    prompt_embeddings = None
+    extra_step_kwargs = None
+    
+    def __init__(
+        self,
+        benchmark_sample_num,
+        init_latents,
+        prompt_embeddings,
+        extra_step_kwargs,
+    ):
+        
+        
+        self.benchmark_sample_num = copy.deepcopy(benchmark_sample_num)
+        self.init_latents = serialize(copy.deepcopy(init_latents))
+        self.prompt_embeddings = serialize(copy.deepcopy(prompt_embeddings))
+        self.extra_step_kwargs = serialize(copy.deepcopy(extra_step_kwargs))    
+        # self.decode_latents_model = decode_latents
+        # self.batch_size = copy.deepcopy(batch_size)
+        # self.benchmark_samples = copy.deepcopy(benchmark_samples)
+    
+
+    def acc_benchmark_pipeline(self, pipeline, device):
+        '''
+        This benchmark exclusively evaluates a pipeline. .
+
+        Args:
+            pipeline: The pipeline to be assessed. get the given prompt_embeds and initial latent, and output the generated latent.
+
+        Returns:
+            Returns the accuracy score, which ranges from -1 to 1. Higher scores indicate better performance.
+        ''' 
+
+        tmpinit_latents = deserialize(self.init_latents)
+        tmpprompt_embeddings = deserialize(self.prompt_embeddings)
+        tmpextra_step_kwargs = deserialize(self.extra_step_kwargs)    
+        outputs = []
+        for i in range(self.benchmark_sample_num):
+            latent = copy.deepcopy(tmpinit_latents[i]).to(device)
+            prompt_embeds = tmpprompt_embeddings[i].to(device)
+            extra_step_kwargs = tmpextra_step_kwargs[i]
+            with torch.no_grad():
+                output = pipeline(prompt_embeds, latent, extra_step_kwargs).to('cpu')              
+                outputs.append(output) 
+        return outputs
+    
 
 class AccBenchmark(object):
     benchmark_sample_num:int = 20
@@ -204,7 +264,11 @@ class AccBenchmark(object):
                 out1=self.numpy_to_pil(self.decode_latents(output1))
                 self.benchmark_samples.append(out1)
         #remove the baseline_pipeline from the CUDA device to conserve DRAM.
-        self.baseline_pipeline = None  
+        self.baseline_pipeline.to('cpu')
+        for tmp in self.prompt_embeddings:
+            tmp.to('cpu')
+        for tmp in self.init_latents:
+            tmp.to('cpu')
 
 
     def acc_benchmark_single(self, my_unet):
@@ -259,8 +323,27 @@ class AccBenchmark(object):
                     outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
         return find_median(outs)
         
-
-
+    def acc_benchmark_outputs(self, outputs):
+        outs = []
+        self.baseline_pipeline.to('cuda')
+        with torch.no_grad():
+            len_outputs = len(outputs)
+            for i in range(len_outputs):
+                output=outputs[i].to('cuda')
+                out = self.numpy_to_pil(self.decode_latents(output)) 
+                output.to('cpu')
+                for j in range(self.batch_size):
+                    outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
+                i+=1
+        self.baseline_pipeline.to('cpu')
+        return find_median(outs)
+    
+    def gen_MinAccbench(self):
+        return MinAccbench(self.benchmark_sample_num,
+                           self.init_latents,
+                           self.prompt_embeddings,
+                           self.extra_step_kwargs)
+    
 
 # here is an example
 # if __name__ == "__main__":
