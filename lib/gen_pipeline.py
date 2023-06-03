@@ -12,7 +12,14 @@ import pickle
 import io
 # from model import model.UNet2DConditionModel
 
+def serialize(object):
+    buffer = io.BytesIO()
+    torch.save(object, buffer)
+    return buffer.getvalue()
 
+def deserialize(object):
+    buffer = io.BytesIO(object)
+    return torch.load(buffer)
 
 def gen(my_unet, latents, t, prompt_embeds, cross_attention_kwargs, guidance_scale):
     with torch.no_grad():
@@ -37,18 +44,15 @@ class PipelineUtils(object):
     scheduler: diffusers.schedulers.KarrasDiffusionSchedulers = DPMSolverSinglestepScheduler(beta_start=0.00085, beta_end=0.012)
     guidance_scale:float = 8.0
     device_memory = 32768
-    config = None
     
     def __init__(self,
                 _scheduler: diffusers.schedulers.KarrasDiffusionSchedulers = DPMSolverSinglestepScheduler(beta_start=0.00085, beta_end=0.012),
                 _guidance_scale = 8.0,
                 _device_memory = 32768,
-                _config = None
                 ) -> None:
         self.scheduler = _scheduler
         self.guidance_scale = _guidance_scale
         self.device_memory = _device_memory
-        self.config = _config
 
 
 
@@ -85,10 +89,7 @@ class MyPipeline(object):
             else:
                 if (name in models):
                     
-                    self.device_model[name] = model.UNet2DConditionModel(**self.utils.config) 
-                    f = io.BytesIO(models[name].model)
-                    py_dict = pickle.load(f)
-                    self.device_model[name].load_state_dict(py_dict)
+                    self.device_model[name] = deserialize(models[name].model)
                     self.current_memory += models[name].size
                     if (self.current_memory > self.utils.device_memory):
                         raise Exception("Memory limit exceeded")
@@ -123,7 +124,6 @@ class PipelineGenerator(object):
     utils: PipelineUtils
     # normal_device_memory = 131072
     models:dict[str, ModelData] = {}
-    model_config = None
     
     def __init__(self,
                  _scheduler: diffusers.schedulers.KarrasDiffusionSchedulers = DPMSolverSinglestepScheduler(beta_start=0.00085, beta_end=0.012),
@@ -147,16 +147,14 @@ class PipelineGenerator(object):
         return:
             None
         '''
-        def load_model(path):
-            # with open(model_json_path, "r") as f:
-            #     config = json.load(f)
-            # unet = model.UNet2DConditionModel(**config)
+        def load_model(model_json_path, path):
+            with open(model_json_path, "r") as f:
+                config = json.load(f)
+            unet = model.UNet2DConditionModel(**config)
             if path is not None:
                 sd = torch.load(path)
-                f = io.BytesIO()
-                pickle.dump(sd, f)
-                bytes_obj = f.getvalue()
-                return bytes_obj
+                unet.load_state_dict(sd)
+                return unet
             return None
 
             # replace with actual model loading code 
@@ -165,17 +163,12 @@ class PipelineGenerator(object):
             tmpmodels = json.load(f)
 
 
-        with open(model_json_path, "r") as f:
-            config = json.load(f)
         # now, models is a list of dictionaries, each representing a model
         for model in tmpmodels:
             path = os.path.join(os.path.dirname(config_json_path), model['relative_path'])
 
-            loaded_model = load_model(path)
-            self.models[model['name']] = ModelData(model['name'], loaded_model, model['size'], model['end2end_time'])  
-        
-        self.model_config = config
-        self.utils.config = config
+            loaded_model = load_model(model_json_path, path)
+            self.models[model['name']] = ModelData(model['name'], serialize(loaded_model), model['size'], model['end2end_time'])  
             
     def generate(self, pipeline_info:list[str]):
         return MyPipeline(self.models, self.utils, pipeline_info)

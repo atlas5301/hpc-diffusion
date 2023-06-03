@@ -47,7 +47,7 @@ def random_vector(max_n, max_value=50, num_values=6, similarity_factor=0.5):
 
 def task(pipeline_info, device, shared_object):
     with torch.no_grad():
-        # try:
+        try:
             generator:gen_pipeline.PipelineGenerator = shared_object['generator']
             benchmark:acc_bench.MinAccbench = shared_object['benchmark'][device]
             keys = sorted(generator.models.keys())
@@ -56,9 +56,9 @@ def task(pipeline_info, device, shared_object):
             pipeline.move_to_device(device)
             result = benchmark.acc_benchmark_pipeline(pipeline, device)
             pipeline.move_to_device('cpu')
-        # except Exception as e:
-        #     with open('debug3.txt', "w") as f:
-        #         f.write(str(e)) 
+        except Exception as e:
+            with open('debug3.txt', "w") as f:
+                f.write(str(e)) 
     return serialize(result)
 
 class PipelineDescription(object):
