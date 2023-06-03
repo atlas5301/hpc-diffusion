@@ -281,8 +281,8 @@ class AccBenchmark(object):
         Returns:
             Returns the accuracy score, which ranges from -1 to 1. Higher scores indicate better performance.
         '''
-        
         my_unet.to(self.device)
+        self.baseline_pipeline.vae.to('cuda')
         outs = []
         for i in range(self.benchmark_sample_num):
             output = copy.deepcopy(self.init_latents[i])
@@ -296,9 +296,11 @@ class AccBenchmark(object):
                 for j, t in enumerate(timesteps):
                     tmp1 = gen(my_unet, output, t, prompt_embeds,self.cross_attention_kwargs, self.guidance_scale)
                     output = tmpscheduler.step(tmp1, t, output, **extra_step_kwargs).prev_sample 
+                    
                 out = self.numpy_to_pil(self.decode_latents(output))
                 for j in range(self.batch_size):
                     outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
+        self.baseline_pipeline.vae.to('cpu') 
         return find_median(outs)
         
     def acc_benchmark_pipeline(self, pipeline):
@@ -310,7 +312,8 @@ class AccBenchmark(object):
 
         Returns:
             Returns the accuracy score, which ranges from -1 to 1. Higher scores indicate better performance.
-        '''        
+        '''    
+        self.baseline_pipeline.vae.to('cuda')    
         outs = []
         for i in range(self.benchmark_sample_num):
             latent = copy.deepcopy(self.init_latents[i])
@@ -321,11 +324,12 @@ class AccBenchmark(object):
                 out = self.numpy_to_pil(self.decode_latents(output))               
                 for j in range(self.batch_size):
                     outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
+        self.baseline_pipeline.vae.to('cpu') 
         return find_median(outs)
         
     def acc_benchmark_outputs(self, outputs):
         outs = []
-        self.baseline_pipeline.to('cuda')
+        self.baseline_pipeline.vae.to('cuda')
         with torch.no_grad():
             len_outputs = len(outputs)
             for i in range(len_outputs):
@@ -335,7 +339,7 @@ class AccBenchmark(object):
                 for j in range(self.batch_size):
                     outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
                 i+=1
-        self.baseline_pipeline.to('cpu')
+        self.baseline_pipeline.vae.to('cpu')
         return find_median(outs)
     
     def gen_MinAccbench(self):

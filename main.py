@@ -7,7 +7,7 @@ import os
 
 project_dir = add_project_to_path.project_dir
 model_config_path = os.path.join(project_dir, 'models/stable-diffusion-v1-4/unet/config.json')
-model_path = ""
+model_path = "/home/wuzw21/stable-diffusion-unet-quantization/quant/config.json"
 
 
 if __name__ == '__main__':

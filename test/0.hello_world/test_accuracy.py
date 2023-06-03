@@ -57,3 +57,5 @@ def test_acc_benchmark_pipeline():
        
     
 
+if __name__ == '__main__':
+    test_acc_benchmark_unet()
