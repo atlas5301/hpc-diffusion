@@ -7,7 +7,7 @@ import os
 
 project_dir = add_project_to_path.project_dir
 model_config_path = os.path.join(project_dir, 'models/stable-diffusion-v1-4/unet/config.json')
-model_path = "/home/wuzw21/stable-diffusion-unet-quantization/quant/config.json"
+quant_model_path = "/home/wuzw21/stable-diffusion-unet-quantization/quant/config.json"
 
 
 if __name__ == '__main__':
@@ -15,7 +15,7 @@ if __name__ == '__main__':
     pipeline = DiffusionPipeline.from_pretrained(model_path,
                                              torch_dtype=torch.float16,).to('cuda')
     tmpsearcher = PipelineSearcher(_baseline_pipeline= pipeline,)
-    tmpsearcher.load(model_config_path, model_path)
+    tmpsearcher.load(model_config_path, quant_model_path)
     tmpsearcher.scheduler_init()
     tmpsearcher.inject_pipelines([[j for i in range(50)] for j in range(len(tmpsearcher.generator.models))])
     print(tmpsearcher.search())
