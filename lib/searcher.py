@@ -7,6 +7,7 @@ import copy
 import random
 import numpy as np
 import io
+import timeit
 
 # from .gen_pipeline import PipelineGenerator
 # from .acc_bench import AccBenchmark
@@ -59,7 +60,7 @@ def task(pipeline_info, device, shared_object):
         except Exception as e:
             with open('debug3.txt', "w") as f:
                 f.write(str(e)) 
-    return serialize(result)
+    return result
 
 class PipelineDescription(object):
     pipeline_info: list
@@ -102,6 +103,7 @@ class PipelineSearcher(object):
             _injected_models= _injected_models
         )
         self.generator.models.update(_injected_models)
+        self.generator.utils.vae_bytes = serialize(_baseline_pipeline.vae)
         
         self.benchmark = acc_bench.AccBenchmark(
             _baseline_pipeline= _baseline_pipeline,
@@ -130,8 +132,8 @@ class PipelineSearcher(object):
         M = min(N, M)
         # Determine the actual number of unique values and the actual length of the list
         # Use squaring to give higher weight to larger numbers
-        actual_M = int(M * (random.random() ** 0.5)) + 1
-        actual_K = int(K * (random.random() ** 0.5)) + 1
+        actual_M = min(int(M * (random.random()))+1, N)
+        actual_K = min(int(K * (random.random()))+1, K)
 
         # Generate actual_M unique values between 1 and N, and a list of size actual_K from these values
         unique_values = random.sample(range(0, N), actual_M)
@@ -171,10 +173,15 @@ class PipelineSearcher(object):
 
 
     def validate_pipeline_info(self, pipeline_info, time_limit) -> bool:
+        # with open('debug_time.txt', "a") as f:
+        #     f.write(str(pipeline_info)+str('\n'))        
         if (pipeline_info == None):
             return False
         if (not pipeline_info):
             return False
+        
+        # with open('debug_time.txt', "a") as f:
+        #     f.write(str('not empty')+str('\n'))
         keys = sorted(self.generator.models.keys())
         new_pipeline_info = [keys[i] for i in pipeline_info]
         device_model = set()
@@ -188,11 +195,17 @@ class PipelineSearcher(object):
                     device_model.add(name)
                     current_memory += self.generator.models[name].size
                     if (current_memory > self.generator.utils.device_memory):
+                        # with open('debug_time.txt', "a") as f:
+                        #     f.write(str('OOM')+str('\n'))
                         return False
                 else:
+                    # with open('debug_time.txt', "a") as f:
+                    #     f.write(str('key error')+str('\n'))
                     return False
             end2end_time += self.generator.models[name].end2endtime
             if (end2end_time > time_limit):
+                # with open('debug_time.txt', "a") as f:
+                #     f.write(str('tle')+str('\n'))
                 return False
         return True
 
@@ -213,17 +226,18 @@ class PipelineSearcher(object):
         return PipelineDescription(pipeline_info, accuracy, end2end_time, current_memory)      
         
     def result_process(self, results):
-        tmplist = []
-        for output in results:
-            if (output!=None):
-                output = deserialize(output)
-                if ((output!=None) and output):
-                    tmplist.append(self.benchmark.acc_benchmark_outputs(output))
-                else:
-                    tmplist.append(None)
-            else:
-                tmplist.append(None)
-        return tmplist
+        return results
+        # tmplist = []
+        # for output in results:
+        #     if (output!=None):
+        #         output = deserialize(output)
+        #         if ((output!=None) and output):
+        #             tmplist.append(self.benchmark.acc_benchmark_outputs(output))
+        #         else:
+        #             tmplist.append(None)
+        #     else:
+        #         tmplist.append(None)
+        # return tmplist
 
     def searcher_run_once(
         self,
@@ -235,7 +249,7 @@ class PipelineSearcher(object):
         M = 6,
         K = 30,
         mutate_delete_weight = 0.7,
-        max_tries_random = 10000,
+        max_tries_random = 1000,
     ):
         new_pipelines = []
         num_mutate = int(min(mutate_rate*num_candidates, len(self.pipelines)))
@@ -243,23 +257,43 @@ class PipelineSearcher(object):
         if (num_mutate == int(mutate_rate*num_candidates)):
             if (num_mutate > 0):
                 current_time_limit = min(time_limit, self.pipelines[num_mutate-1].end2end_time)
-            
+        
+        # start_time = timeit.default_timer()
         for i in range(num_mutate):
             new_pipelines.append(self.mutate(self.pipelines[i].pipeline_info, mutate_delete_weight, 1-mutate_delete_weight))
-            
+        
+        # end_time = timeit.default_timer()
+        # with open('debug_time.txt', "w+") as f:
+        #     f.write(str('hey!!')+str(end_time - start_time)+str('\n')+str(num_candidates - num_mutate)+str('\n'))
+         
         num_new = num_candidates - num_mutate
         for i in range(num_new):
-            tmp = []
-            for i in range(max_tries_random):
+            tmp = [] 
+            for j in range(max_tries_random):
+                # start_time = timeit.default_timer()
                 tmp = self.generate_random_pipeline_info(M, K, temperature)
                 if (self.validate_pipeline_info(tmp, current_time_limit)):
                     new_pipelines.append(tmp)
                     break
+                # end_time = timeit.default_timer()
+                # with open('debug_time.txt', "a") as f:
+                #     f.write(str(end_time - start_time)+str('\n'))
         
+        with open('debug3.txt', "w") as f:
+            f.write(str(new_pipelines)) 
+        
+        tmplist = []
+        for pipeline in new_pipelines:
+            tmplist.append(self.gen_pipeline_description(pipeline, 0))
+        tmplist = sorted(tmplist, key= lambda obj: obj.end2end_time, reverse=True)
+        new_pipelines = []
+        for pipelinedescription in tmplist:
+            new_pipelines.append(pipelinedescription.pipeline_info)
+            
         
         results = self.taskscheduler.submit(new_pipelines)
-        with open('debug2.txt', "w") as f:
-            f.write(str(results))
+        # with open('debug2.txt', "w") as f:
+        #     f.write(str(results))
         results = self.result_process(results)
         len_results = len(results)
         for i in range(len_results):
@@ -276,8 +310,8 @@ class PipelineSearcher(object):
     def inject_pipelines(self, pipeline_info_list: list, expected_accuracy = 0.95, num_candidates = 120):
         results = self.taskscheduler.submit(pipeline_info_list)
         len_results = len(results)
-        with open('debug.txt', "w") as f:
-            f.write(str(results))
+        # with open('debug.txt', "w") as f:
+        #     f.write(str(results))
             
         results = self.result_process(results)
             
@@ -300,7 +334,7 @@ class PipelineSearcher(object):
         M = 6,
         K = 30,
         mutate_delete_weight = 0.7,
-        max_tries_random = 10000,        
+        max_tries_random = 1000,        
     ):
         for i in range(num_rounds):
             self.searcher_run_once(

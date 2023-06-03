@@ -117,6 +117,7 @@ class MinAccbench(object):
         init_latents,
         prompt_embeddings,
         extra_step_kwargs,
+        benchmark_samples
     ):
         
         
@@ -126,8 +127,24 @@ class MinAccbench(object):
         self.extra_step_kwargs = serialize(copy.deepcopy(extra_step_kwargs))    
         # self.decode_latents_model = decode_latents
         # self.batch_size = copy.deepcopy(batch_size)
-        # self.benchmark_samples = copy.deepcopy(benchmark_samples)
+        self.benchmark_samples = copy.deepcopy(benchmark_samples)
     
+    @staticmethod
+    def numpy_to_pil(images):
+        """
+        Convert a numpy image or a batch of images to a PIL image.
+        """
+        if images.ndim == 3:
+            images = images[None, ...]
+        images = (images * 255).round().astype("uint8")
+        if images.shape[-1] == 1:
+            # special case for grayscale (single channel) images
+            pil_images = [Image.fromarray(image.squeeze(), mode="L") for image in images]
+        else:
+            pil_images = [Image.fromarray(image) for image in images]
+
+        return pil_images
+
 
     def acc_benchmark_pipeline(self, pipeline, device):
         '''
@@ -149,9 +166,20 @@ class MinAccbench(object):
             prompt_embeds = tmpprompt_embeddings[i].to(device)
             extra_step_kwargs = tmpextra_step_kwargs[i]
             with torch.no_grad():
-                output = pipeline(prompt_embeds, latent, extra_step_kwargs).to('cpu')              
-                outputs.append(output) 
-        return outputs
+                output = pipeline(prompt_embeds, latent, extra_step_kwargs)            
+                outputs.append(output)       
+        outs = []
+        pipeline.vae.to(device)
+        with torch.no_grad():
+            len_outputs = len(outputs)
+            for i in range(len_outputs):
+                output=outputs[i]
+                out = self.numpy_to_pil(pipeline.decode_latents(output)) 
+                output.to('cpu')
+                for j in range(len(out)):
+                    outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
+        pipeline.vae.to('cpu')
+        return find_median(outs)
     
 
 class AccBenchmark(object):
@@ -338,7 +366,6 @@ class AccBenchmark(object):
                 output.to('cpu')
                 for j in range(self.batch_size):
                     outs.append(calculate_ssim(out[j], self.benchmark_samples[i][j]))
-                i+=1
         self.baseline_pipeline.vae.to('cpu')
         return find_median(outs)
     
@@ -346,7 +373,8 @@ class AccBenchmark(object):
         return MinAccbench(self.benchmark_sample_num,
                            self.init_latents,
                            self.prompt_embeddings,
-                           self.extra_step_kwargs)
+                           self.extra_step_kwargs,
+                           self.benchmark_samples)
     
 
 # here is an example

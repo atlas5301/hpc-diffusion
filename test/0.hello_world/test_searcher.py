@@ -29,17 +29,21 @@ def test_searcher():
                                              ).to('cuda')
     tmp_models = {}
     for i in range(1):
-        tmp_models[i] = lib.ModelData(i, serialize(pipeline.unet.to('cpu')), 4096, 0.130)
+        tmp_models[i] = lib.ModelData(i, serialize(pipeline.unet.to('cpu')), 4096, 0.06632188)
     tmpsearcher = PipelineSearcher(_baseline_pipeline= pipeline,
-                                   _num_inference_steps = 10,
+                                   _num_inference_steps = 30,
                                    _device_memory = 12000,
                                    _injected_models = tmp_models)
     
     
     tmpsearcher.scheduler_init()
     
-    tmpsearcher.inject_pipelines([[j for i in range(30)] for j in range(len(tmpsearcher.generator.models))], expected_accuracy=0.1)
-    print(tmpsearcher.search(num_rounds=1, num_candidates=8, expected_accuracy=0.1))
+    print('fully_initialized')
+    # tmpsearcher.inject_pipelines([[j for i in range(30)] for j in range(len(tmpsearcher.generator.models))], expected_accuracy=0.95)
+    print('injected_custom_pipeline')
+    result = tmpsearcher.search(num_rounds=3, num_candidates=32, expected_accuracy=0.95, K=50)
+    print('search_finished')
+    print(result.accuracy, ' ', result.end2end_time, ' ', result.pipeline_info)
     
 if __name__ == '__main__':
     test_searcher()

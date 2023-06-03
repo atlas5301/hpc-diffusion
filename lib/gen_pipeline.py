@@ -44,6 +44,7 @@ class PipelineUtils(object):
     scheduler: diffusers.schedulers.KarrasDiffusionSchedulers = DPMSolverSinglestepScheduler(beta_start=0.00085, beta_end=0.012)
     guidance_scale:float = 8.0
     device_memory = 32768
+    vae_bytes:bytes = None
     
     def __init__(self,
                 _scheduler: diffusers.schedulers.KarrasDiffusionSchedulers = DPMSolverSinglestepScheduler(beta_start=0.00085, beta_end=0.012),
@@ -53,6 +54,7 @@ class PipelineUtils(object):
         self.scheduler = _scheduler
         self.guidance_scale = _guidance_scale
         self.device_memory = _device_memory
+        self.vae_bytes = None
 
 
 
@@ -74,21 +76,24 @@ class MyPipeline(object):
     device_model:dict[str, model.UNet2DConditionModel] = {}
     current_memory = 0
     end2end_time = 0.0
+    vae = None
     utils: PipelineUtils = None
     
-    def __init__(self, models: dict[str, ModelData], utils, pipeline_info) -> None:
+    def __init__(self, models: dict[str, ModelData], utils: PipelineUtils, pipeline_info) -> None:
         self.pipeline_info = pipeline_info
         self.device_model = {}
         self.end2end_time = 0.0
         self.current_memory = 0
         self.utils = copy.deepcopy(utils)
         self.device: torch.device = None
+        self.vae = deserialize(self.utils.vae_bytes)
+        self.utils.vae_bytes = None
+        
         for name in self.pipeline_info:
             if (name in self.device_model):
                 pass
             else:
                 if (name in models):
-                    
                     self.device_model[name] = deserialize(models[name].model)
                     self.current_memory += models[name].size
                     if (self.current_memory > self.utils.device_memory):
@@ -101,6 +106,15 @@ class MyPipeline(object):
         for model in self.device_model.values():
             model.to(device)
         self.device = device
+          
+          
+    def decode_latents(self, latents):
+        latents = 1 / self.vae.config.scaling_factor * latents
+        image = self.vae.decode(latents).sample
+        image = (image / 2 + 0.5).clamp(0, 1)
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
+        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+        return image
                     
     def __call__(self, prompt_embeds, latent, extra_step_kwargs) -> Any:
         output = latent
@@ -114,8 +128,7 @@ class MyPipeline(object):
             timesteps = tmpscheduler.timesteps
             for j, t in enumerate(timesteps):
                 tmp1 = gen(self.device_model[self.pipeline_info[j]], output, t, prompt_embeds,None, self.utils.guidance_scale) 
-                output = tmpscheduler.step(tmp1, t, output, **extra_step_kwargs).prev_sample 
-             
+                output = tmpscheduler.step(tmp1, t, output, **extra_step_kwargs).prev_sample    
         return output              
 
 
@@ -142,7 +155,8 @@ class PipelineGenerator(object):
         Automatically load models(unets) from folder. Will read the json at first and automatically load models then.
         
         Args:
-            json_path: the path of json file(contains the names, the sizes, the end2end time and the relative paths(of the json) of these models)
+            model_json_path: the path of the configuration file of unet.
+            config_json_path: the path of json file(contains the names, the sizes, the end2end time and the relative paths(of the json) of these models)
             
         return:
             None
@@ -164,11 +178,11 @@ class PipelineGenerator(object):
 
 
         # now, models is a list of dictionaries, each representing a model
-        for model in tmpmodels:
-            path = os.path.join(os.path.dirname(config_json_path), model['relative_path'])
+        for _model in tmpmodels:
+            path = os.path.join(os.path.dirname(config_json_path), _model['relative_path'])
 
             loaded_model = load_model(model_json_path, path)
-            self.models[model['name']] = ModelData(model['name'], serialize(loaded_model), model['size'], model['end2end_time'])  
+            self.models[_model['name']] = ModelData(_model['name'], serialize(loaded_model), _model['size'], _model['end2end_time'])  
             
     def generate(self, pipeline_info:list[str]):
         return MyPipeline(self.models, self.utils, pipeline_info)
